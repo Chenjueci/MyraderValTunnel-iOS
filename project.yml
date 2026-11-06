@@ -1,0 +1,62 @@
+# xcodegen 工程描述：在 Mac 上执行 `xcodegen generate` 即生成 MyraderValTunnel.xcodeproj。
+# 免签名 CI 与签名 CI 共用此文件；签名参数通过 -xcconfig 注入（见 SIGNING.md）。
+name: MyraderValTunnel
+
+options:
+  bundleIdPrefix: com.myraderval
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: false
+
+settings:
+  base:
+    CLANG_ENABLE_MODULES: "YES"
+    # 使用我们自己的 Info.plist，避免 Xcode 15+ 自动生成导致 "Multiple commands produce Info.plist"
+    GENERATE_INFOPLIST_FILE: "NO"
+    ENABLE_BITCODE: "NO"
+    SWIFT_VERSION: "5.0"
+    FRAMEWORK_SEARCH_PATHS: "$(inherited) $(PROJECT_DIR)"
+    TARGETED_DEVICE_FAMILY: "1,2"
+
+targets:
+  MyraderValTunnel:
+    type: application
+    platform: iOS
+    sources:
+      - path: App/MyraderValTunnel
+    dependencies:
+      # App Extension 必须嵌入到 App 的 PlugIns/ 目录
+      - target: MyraderValTunnelExtension
+        embed: true
+      # 静态库 XCFramework：链接即可，不能 embed
+      - framework: HevSocks5Tunnel.xcframework
+        embed: false
+    settings:
+      base:
+        INFOPLIST_FILE: App/MyraderValTunnel/Info.plist
+        CODE_SIGN_ENTITLEMENTS: App/MyraderValTunnel/MyraderValTunnel.entitlements
+        PRODUCT_BUNDLE_IDENTIFIER: com.myraderval.MyraderValTunnel
+        # 由签名版 CI 的 Signing.xcconfig 注入；免签名 CI 下为空且 CODE_SIGNING_ALLOWED=NO
+        PROVISIONING_PROFILE_SPECIFIER: $(APP_PROFILE)
+    scheme:
+      testTargets: []
+      run:
+        target: MyraderValTunnel
+
+  MyraderValTunnelExtension:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Extension/MyraderValTunnelExtension
+    dependencies:
+      - framework: HevSocks5Tunnel.xcframework
+        embed: false
+    settings:
+      base:
+        INFOPLIST_FILE: Extension/MyraderValTunnelExtension/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Extension/MyraderValTunnelExtension/MyraderValTunnelExtension.entitlements
+        PRODUCT_BUNDLE_IDENTIFIER: com.myraderval.MyraderValTunnel.extension
+        PROVISIONING_PROFILE_SPECIFIER: $(EXT_PROFILE)
+        # Xcode 的 build setting 名是 SWIFT_OBJC_BRIDGING_HEADER（不是 OBJ_C_BRIDGING_HEADER）
+        SWIFT_OBJC_BRIDGING_HEADER: Extension/MyraderValTunnelExtension/MyraderValTunnelExtension-Bridging-Header.h
