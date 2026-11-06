@@ -60,11 +60,13 @@ struct ContentView: View {
 
     private func setup() {
         refreshStatus()
-        // 用 [weak self] 避免闭包内显式 self 的编译要求与循环引用
+        // ContentView 是值类型（struct），不能对 self 使用 weak / unowned。
+        // 闭包捕获的是 self 的值拷贝；@State 内部为引用盒，写入仍会反映到视图，
+        // 且值类型不会与闭包形成循环引用，因此这里不需要 [weak self]。
         statusObserver = NotificationCenter.default.addObserver(
             forName: .NEVPNStatusDidChange, object: nil, queue: .main
-        ) { [weak self] _ in
-            self?.refreshStatus()
+        ) { _ in
+            self.refreshStatus()
         }
     }
 
@@ -91,8 +93,7 @@ struct ContentView: View {
 
     private func toggleVPN() {
         let manager = NEVPNManager.shared()
-        manager.loadFromPreferences { [weak self] error in
-            guard let self = self else { return }
+        manager.loadFromPreferences { error in
             if let error = error {
                 NSLog("[MyraderValTunnel] loadFromPreferences: \(error)")
                 // 首次运行时可能没有配置，继续写入即可
@@ -123,8 +124,7 @@ struct ContentView: View {
         manager.isEnabled = true
         manager.isOnDemandEnabled = false
 
-        manager.saveToPreferences { [weak self] saveError in
-            guard let self = self else { return }
+        manager.saveToPreferences { saveError in
             if let saveError = saveError {
                 self.message = "保存失败：\(saveError.localizedDescription)"
                 return
