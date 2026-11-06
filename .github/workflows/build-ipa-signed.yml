@@ -1,0 +1,174 @@
+name: Build iOS IPA (signed, no Mac needed)
+
+# 在 GitHub 云端 macOS Runner 上构建「已正确签名」的 IPA。
+# 用于解决 packet-tunnel 网络扩展需要带 Network Extensions 能力的
+# provisioning profile 才能被系统激活的问题（免签名 IPA 装上可能连不上）。
+#
+# 前置：按 SIGNING.md 配置 6 个 Repository Secrets，然后手动触发本工作流。
+on:
+  workflow_dispatch:
+    inputs:
+      export_method:
+        description: '导出方式（development=注册设备调试；ad-hoc=注册设备分发）'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+          - development
+          - ad-hoc
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 选择 Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: 安装 xcodegen
+        run: brew install xcodegen
+
+      - name: 构建 HevSocks5Tunnel.xcframework（上游 MIT）
+        env:
+          IOS_ONLY: "1"
+        run: bash scripts/fetch-build-xcframework.sh
+
+      - name: 导入签名证书到临时钥匙串
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -e
+          CERT_PATH="$RUNNER_TEMP/cert.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          echo "$BUILD_CERTIFICATE_BASE64" | base64 -D > "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$P12_PASSWORD" \
+              -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+              -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
+      - name: 安装两份 provisioning profile 并解析名称
+        env:
+          APP_PROVISION_PROFILE_BASE64: ${{ secrets.APP_PROVISION_PROFILE_BASE64 }}
+          EXT_PROVISION_PROFILE_BASE64: ${{ secrets.EXT_PROVISION_PROFILE_BASE64 }}
+        run: |
+          set -e
+          PP_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PP_DIR"
+
+          install_profile() {
+            local b64="$1" out="$2" tmp uuid name
+            echo "$b64" | base64 -D > "$out"
+            tmp=$(mktemp)
+            security cms -D -i "$out" > "$tmp"
+            uuid=$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$tmp")
+            name=$(/usr/libexec/PlistBuddy -c 'Print :Name' "$tmp")
+            rm -f "$tmp"
+            cp "$out" "$PP_DIR/$uuid.mobileprovision"
+            echo "$name"
+          }
+
+          APP_PROFILE=$(install_profile "$APP_PROVISION_PROFILE_BASE64" "$RUNNER_TEMP/app.mobileprovision")
+          EXT_PROFILE=$(install_profile "$EXT_PROVISION_PROFILE_BASE64" "$RUNNER_TEMP/ext.mobileprovision")
+          echo "APP_PROFILE=$APP_PROFILE" >> "$GITHUB_ENV"
+          echo "EXT_PROFILE=$EXT_PROFILE" >> "$GITHUB_ENV"
+          echo "已安装 profile：App=$APP_PROFILE / Extension=$EXT_PROFILE"
+
+      - name: 生成 Xcode 工程
+        run: xcodegen generate
+
+      - name: 生成签名用 xcconfig
+        env:
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+        run: |
+          set -e
+          # APP_PROFILE / EXT_PROFILE 由上一 step 写入 $GITHUB_ENV，
+          # 这里直接作为 shell 环境变量读取，避免表达式求值时机问题。
+          python3 - <<'PY'
+          import os
+          lines = [
+              "DEVELOPMENT_TEAM = " + os.environ["TEAM_ID"],
+              "CODE_SIGN_STYLE = Manual",
+              "CODE_SIGN_IDENTITY = Apple Development",
+              "APP_PROFILE = " + os.environ["APP_PROFILE"],
+              "EXT_PROFILE = " + os.environ["EXT_PROFILE"],
+          ]
+          path = os.path.join(os.environ["RUNNER_TEMP"], "Signing.xcconfig")
+          with open(path, "w") as f:
+              f.write("\n".join(lines) + "\n")
+          print(open(path).read())
+          PY
+
+      - name: Archive（按 Bundle ID 分别使用各自的 profile）
+        env:
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+        run: |
+          set -e
+          xcodebuild -project MyraderValTunnel.xcodeproj \
+            -scheme MyraderValTunnel \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/MyraderValTunnel.xcarchive" \
+            -xcconfig "$RUNNER_TEMP/Signing.xcconfig" \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            CODE_SIGNING_ALLOWED=YES \
+            archive
+
+      - name: 生成 ExportOptions.plist
+        env:
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+          EXPORT_METHOD: ${{ inputs.export_method }}
+        run: |
+          set -e
+          python3 - <<'PY'
+          import os, plistlib
+          d = {
+              "method": os.environ.get("EXPORT_METHOD", "development"),
+              "teamID": os.environ["TEAM_ID"],
+              "signingStyle": "manual",
+              "provisioningProfiles": {
+                  "com.myraderval.MyraderValTunnel": os.environ["APP_PROFILE"],
+                  "com.myraderval.MyraderValTunnel.extension": os.environ["EXT_PROFILE"],
+              },
+              "compileBitcode": False,
+              "stripSwiftSymbols": True,
+          }
+          path = os.path.join(os.environ["RUNNER_TEMP"], "ExportOptions.plist")
+          with open(path, "wb") as f:
+              plistlib.dump(d, f)
+          print("ExportOptions:", d)
+          PY
+
+      - name: 导出已签名 IPA
+        run: |
+          set -e
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/MyraderValTunnel.xcarchive" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist"
+          ls -la "$RUNNER_TEMP/export"
+
+      - name: 上传 IPA 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: MyraderValTunnel-signed.ipa
+          path: ${{ runner.temp }}/export/*.ipa
+          if-no-files-found: error
+
+      - name: 清理钥匙串与证书
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/build.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/app.mobileprovision" \
+                "$RUNNER_TEMP/ext.mobileprovision"
