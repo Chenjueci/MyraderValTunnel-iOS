@@ -1,0 +1,24 @@
+# hev-socks5-tunnel 配置示例（运行时由 Extension 的 TunnelConfig.swift 生成）
+# 仅作格式参考。tun_fd 由 socketpair 提供，因此 tunnel.name/ipv4/ipv6 仅作标识；
+# tunnel.mtu 必须与 NEPacketTunnelNetworkSettings.mtu 一致（默认 1500）。
+
+tunnel:
+  name: tun0
+  mtu: 1500
+  ipv4: 198.18.0.1
+  ipv6: 'fc00::1'
+  icmp: 'off'
+
+socks5:
+  port: 1080
+  address: 'proxy.example.com'
+  udp: 'udp'
+  # username: 'your-user'
+  # password: 'your-pass'
+
+# iOS NetworkExtension 内存上限很小，必须收紧以下参数以防 jetsam/OOM
+misc:
+  task-stack-size: 24576   # 20480 + tcp-buffer-size
+  tcp-buffer-size: 4096
+  max-session-count: 120
+  log-level: 'warn'
