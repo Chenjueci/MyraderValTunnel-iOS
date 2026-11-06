@@ -1,0 +1,87 @@
+name: Build iOS IPA (unsigned, no Mac needed)
+
+# 在 GitHub 的云端 macOS Runner 上构建免签名 IPA。
+# 你不需要拥有 Mac：推到 GitHub 触发此工作流即可下载 IPA，
+# 再用 TrollStore / Sideloadly / AltStore 侧载（由侧载工具重签）。
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 选择 Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: 安装 xcodegen
+        run: brew install xcodegen
+
+      - name: 构建 HevSocks5Tunnel.xcframework（上游 MIT，仅 iphoneos/arm64）
+        env:
+          IOS_ONLY: "1"
+        run: bash scripts/fetch-build-xcframework.sh
+
+      - name: 校验 XCFramework
+        run: |
+          set -e
+          test -d HevSocks5Tunnel.xcframework || { echo "缺少 XCFramework"; exit 1; }
+          find HevSocks5Tunnel.xcframework -maxdepth 3 -type f | head -20
+
+      - name: 生成 Xcode 工程
+        run: xcodegen generate
+
+      - name: 编译（免签名 / ad-hoc，无需 Apple 账号）
+        run: |
+          set -e
+          xcodebuild -project MyraderValTunnel.xcodeproj \
+            -target MyraderValTunnel \
+            -configuration Release \
+            -sdk iphoneos \
+            SYMROOT="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            build
+
+      - name: 定位 .app 并校验扩展已嵌入
+        run: |
+          set -e
+          APP=$(find "$PWD/build" -type d -name 'MyraderValTunnel.app' | head -1)
+          if [ -z "$APP" ]; then
+            echo "未找到 MyraderValTunnel.app，build 目录："
+            find "$PWD/build" -maxdepth 5 -type d | head -40
+            exit 1
+          fi
+          APPEX=$(find "$APP/PlugIns" -maxdepth 2 -type d -name '*.appex' 2>/dev/null | head -1)
+          if [ -z "$APPEX" ]; then
+            echo "错误：App 内未嵌入 .appex，IPA 装上也无法建立隧道"
+            find "$APP" -maxdepth 3 | head -40
+            exit 1
+          fi
+          echo "APP=$APP" >> "$GITHUB_ENV"
+          echo "已确认扩展已嵌入: $APPEX"
+
+      - name: 打包免签名 IPA
+        run: |
+          set -e
+          rm -rf Payload && mkdir -p Payload
+          cp -R "$APP" Payload/
+          find Payload -name '.DS_Store' -delete
+          zip -X -r -q MyraderValTunnel.ipa Payload
+          ls -la MyraderValTunnel.ipa
+          echo "=== IPA 内关键条目 ==="
+          unzip -l MyraderValTunnel.ipa | grep -E 'MyraderValTunnel.app/Info.plist|\.appex/Info.plist' | head -5
+
+      - name: 上传 IPA 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: MyraderValTunnel-unsigned.ipa
+          path: MyraderValTunnel.ipa
+          if-no-files-found: error
